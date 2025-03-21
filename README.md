@@ -1,2 +1,1 @@
-# business-presentation
-A repository for a business presentation with survey pages
+This repository is empty. Any task executed on it should be considered a new capability and needs to be created.
