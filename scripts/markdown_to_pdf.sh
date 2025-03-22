@@ -40,6 +40,57 @@ check_dependencies() {
   echo
 }
 
+# Function to select a folder
+select_folder() {
+  local current_dir="$(pwd)"
+  local selected_dir=""
+  
+  # Check if a command-line argument was provided
+  if [ "$#" -eq 1 ] && [ -d "$1" ]; then
+    selected_dir="$1"
+    echo -e "${GREEN}Using provided directory:${NC} $selected_dir"
+    return 0
+  fi
+  
+  # Interactive folder selection
+  echo -e "${YELLOW}Select a folder containing Markdown files:${NC}"
+  echo
+  echo -e "1. Use current directory: ${BOLD}$current_dir${NC}"
+  echo -e "2. Browse for a different directory"
+  echo
+  read -p "Enter your choice (1/2): " choice
+  
+  if [ "$choice" = "1" ]; then
+    selected_dir="$current_dir"
+  elif [ "$choice" = "2" ]; then
+    selected_dir=$(browse_folders "$current_dir")
+    if [ $? -eq 1 ]; then
+      return 1
+    fi
+  else
+    echo -e "${RED}Invalid choice. Using current directory.${NC}"
+    selected_dir="$current_dir"
+  fi
+  
+  echo
+  echo -e "${BLUE}Selected directory:${NC} $selected_dir"
+  echo
+  
+  # Check if the directory contains any markdown files
+  if [ $(count_markdown_files "$selected_dir") -eq 0 ]; then
+    echo -e "${RED}No Markdown files found in the selected directory.${NC}"
+    echo -e "Would you like to select a different directory? (y/n)"
+    read retry
+    if [[ "$retry" =~ ^[Yy]$ ]]; then
+      return $(select_folder)
+    else
+      return 1
+    fi
+  fi
+  
+  return 0
+}
+
 # Function to browse folders
 browse_folders() {
   local current_dir="$1"
@@ -115,6 +166,7 @@ convert_markdown_to_pdf() {
   local success_count=0
   local error_count=0
   local total_files=0
+  local error_files=()
   
   # Create output directory if it doesn't exist
   mkdir -p "$output_dir"
@@ -132,12 +184,15 @@ convert_markdown_to_pdf() {
   
   # Process each markdown file
   local current=0
-  find "$input_dir" -maxdepth 1 -type f -name "*.md" | while read -r file; do
+  while IFS= read -r file; do
     current=$((current+1))
     filename=$(basename "$file" .md)
     output_file="$output_dir/${filename}.pdf"
     
     echo -e "${YELLOW}[$current/$total_files] Converting:${NC} $filename.md"
+    
+    # Create a temporary error log file
+    error_log=$(mktemp)
     
     # Run pandoc with error handling
     if pandoc "$file" \
@@ -148,75 +203,156 @@ convert_markdown_to_pdf() {
         -V linkcolor=blue \
         -V urlcolor=blue \
         -V toccolor=blue \
-        --toc 2>/tmp/pandoc_error.log; then
+        --toc 2>"$error_log"; then
       echo -e "${GREEN}✓ Success:${NC} Created $output_file"
       success_count=$((success_count+1))
     else
-      error_message=$(cat /tmp/pandoc_error.log)
+      error_message=$(cat "$error_log")
       echo -e "${RED}✗ Error:${NC} Failed to convert $filename.md"
-      echo -e "${RED}  Error details:${NC} $error_message"
+      if [ -n "$error_message" ]; then
+        echo -e "${RED}  Error details:${NC} $error_message"
+      fi
       error_count=$((error_count+1))
+      error_files+=("$filename.md")
     fi
-  done
+    
+    # Remove the temporary error log
+    rm -f "$error_log"
+  done < <(find "$input_dir" -maxdepth 1 -type f -name "*.md")
   
   echo
   echo -e "${BLUE}Conversion Summary:${NC}"
   echo -e "${GREEN}✓ Successfully converted: $success_count files${NC}"
   if [ "$error_count" -gt 0 ]; then
     echo -e "${RED}✗ Failed to convert: $error_count files${NC}"
+    echo -e "${RED}  Failed files:${NC}"
+    for file in "${error_files[@]}"; do
+      echo -e "    - $file"
+    done
   fi
   echo -e "${BOLD}Output directory:${NC} $output_dir"
+  
+  # Also create a DOCX version if requested
+  echo
+  read -p "Would you also like to convert to DOCX format? (y/n): " create_docx
+  if [[ "$create_docx" =~ ^[Yy]$ ]]; then
+    local docx_dir="$input_dir/docx_output"
+    mkdir -p "$docx_dir"
+    
+    echo -e "${BLUE}Converting to DOCX format...${NC}"
+    local docx_success=0
+    local docx_error=0
+    
+    while IFS= read -r file; do
+      filename=$(basename "$file" .md)
+      docx_file="$docx_dir/${filename}.docx"
+      
+      echo -e "${YELLOW}Converting:${NC} $filename.md to DOCX"
+      
+      # Create a temporary error log file
+      error_log=$(mktemp)
+      
+      if pandoc "$file" -o "$docx_file" 2>"$error_log"; then
+        echo -e "${GREEN}✓ Success:${NC} Created $docx_file"
+        docx_success=$((docx_success+1))
+      else
+        error_message=$(cat "$error_log")
+        echo -e "${RED}✗ Error:${NC} Failed to convert $filename.md to DOCX"
+        if [ -n "$error_message" ]; then
+          echo -e "${RED}  Error details:${NC} $error_message"
+        fi
+        docx_error=$((docx_error+1))
+      fi
+      
+      # Remove the temporary error log
+      rm -f "$error_log"
+    done < <(find "$input_dir" -maxdepth 1 -type f -name "*.md")
+    
+    echo
+    echo -e "${BLUE}DOCX Conversion Summary:${NC}"
+    echo -e "${GREEN}✓ Successfully converted to DOCX: $docx_success files${NC}"
+    if [ "$docx_error" -gt 0 ]; then
+      echo -e "${RED}✗ Failed to convert to DOCX: $docx_error files${NC}"
+    fi
+    echo -e "${BOLD}DOCX output directory:${NC} $docx_dir"
+  fi
   
   return 0
 }
 
-# Main function
-main() {
-  display_header
-  check_dependencies
+# Function to handle batch processing
+batch_process() {
+  local input_dir="$1"
   
-  # Start from current directory
-  current_dir=$(pwd)
-  
-  # Browse folders
-  selected_dir=$(browse_folders "$current_dir")
-  
-  if [ $? -eq 1 ]; then
-    echo -e "${YELLOW}Operation cancelled by user.${NC}"
-    exit 0
-  fi
-  
-  echo
-  echo -e "${BLUE}Selected directory:${NC} $selected_dir"
-  echo
-  
-  # Convert markdown files
-  convert_markdown_to_pdf "$selected_dir"
-  
-  echo
-  echo -e "${GREEN}Conversion process completed.${NC}"
-  echo
+  # Process all markdown files
+  convert_markdown_to_pdf "$input_dir"
   
   # Ask if user wants to open the output directory
+  echo
   read -p "Do you want to open the output directory? (y/n): " open_dir
   if [[ "$open_dir" =~ ^[Yy]$ ]]; then
     if [[ "$OSTYPE" == "darwin"* ]]; then
       # macOS
-      open "$selected_dir/pdf_output"
+      open "$input_dir/pdf_output"
     elif [[ "$OSTYPE" == "msys" || "$OSTYPE" == "win32" ]]; then
       # Windows
-      start "$selected_dir/pdf_output"
+      start "$input_dir/pdf_output"
     else
       # Linux
       if command -v xdg-open &> /dev/null; then
-        xdg-open "$selected_dir/pdf_output"
+        xdg-open "$input_dir/pdf_output"
       else
         echo -e "${YELLOW}Cannot open directory automatically. Please navigate to:${NC}"
-        echo "$selected_dir/pdf_output"
+        echo "$input_dir/pdf_output"
       fi
     fi
   fi
 }
 
-# Run the main function
-main
+# Function to display usage information
+show_usage() {
+  echo -e "${BOLD}Usage:${NC}"
+  echo -e "  $0 [directory]"
+  echo
+  echo -e "${BOLD}Options:${NC}"
+  echo -e "  directory    Optional: Path to directory containing markdown files"
+  echo
+  echo -e "${BOLD}Examples:${NC}"
+  echo -e "  $0                   # Interactive mode"
+  echo -e "  $0 ~/Documents/md    # Convert files in specified directory"
+  echo
+}
+
+# Main function
+main() {
+  display_header
+  
+  # Show usage if help flag is provided
+  if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+    show_usage
+    exit 0
+  fi
+  
+  # Check dependencies
+  check_dependencies
+  
+  # Select folder (using command line argument if provided)
+  select_folder "$@"
+  if [ $? -eq 1 ]; then
+    echo -e "${YELLOW}Operation cancelled.${NC}"
+    exit 0
+  fi
+  
+  # Process the selected folder
+  batch_process "$selected_dir"
+  
+  echo
+  echo -e "${GREEN}Conversion process completed.${NC}"
+  echo
+}
+
+# Store the selected directory as a global variable
+selected_dir=""
+
+# Run the main function with all arguments
+main "$@"
